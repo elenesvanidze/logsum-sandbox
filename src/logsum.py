@@ -239,7 +239,7 @@ def _create_new(temp_path: str, path: str, data: bytes) -> None:
     except OSError:
         pass  # hard links unsupported here: fall back to exclusive create
     try:
-        handle = open(path, "xb")
+        handle = open(path, "xb")  # noqa: SIM115 - handle is returned; caller closes it
     except FileExistsError:
         raise OutputExistsError(path) from None
     try:
