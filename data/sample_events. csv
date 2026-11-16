@@ -1,0 +1,9 @@
+timestamp,level,service,message
+2026-03-01T10:05:00Z, error , Auth ,login failed
+2026-03-01T10:00:00Z,ERROR,auth,login failed
+2026-03-01T10:07:30Z,Error,AUTH,token expired
+2026-03-01T10:02:00Z,INFO,db,connection opened
+2026-03-01T10:03:00Z,,db,heartbeat
+2026-03-01T10:00:00Z,ERROR,auth,login failed
+2026-03-01T10:02:00Z,INFO,db,connection opened
+2026-03-01T10:05:00Z,ERROR,auth,login failed
