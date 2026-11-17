@@ -1,6 +1,6 @@
 """Summarise a synthetic events CSV into one row per (service, level) group.
 
-Usage: python -m src.logsum INPUT OUTPUT [--strict] [--force]
+Usage: python -m src.logsum INPUT OUTPUT [--strict] [--force] [--min-count N]
 
 Behaviour is defined in spec.md; section marks (§n) below point there.
 """
@@ -32,6 +32,9 @@ _TIMESTAMP_RE = re.compile(
     r"(?:\.[0-9]+)?"
     r"(?:(Z)|([+-])([0-9]{2}):([0-9]{2}))?"
 )
+
+# --min-count value: ASCII digits only, like timestamps (§5, §7).
+_MIN_COUNT_RE = re.compile(r"[0-9]+")
 
 
 class FileLevelError(Exception):
@@ -212,6 +215,11 @@ def summarise(
     return groups, skipped
 
 
+def filter_groups(groups: dict, min_count: int) -> dict:
+    """Keep only groups whose count is at least min_count (§3, §7)."""
+    return {key: entry for key, entry in groups.items() if entry[0] >= min_count}
+
+
 def _quote(field: str) -> str:
     """Quote a field only if it needs it (§7 output rules)."""
     if any(char in field for char in ',"\r\n'):
@@ -304,6 +312,15 @@ def _fail(code: int, message: str) -> int:
     return code
 
 
+def _min_count(text: str) -> int:
+    """argparse type for --min-count: a whole number >= 1 (§7)."""
+    if _MIN_COUNT_RE.fullmatch(text) is None or int(text) < 1:
+        raise argparse.ArgumentTypeError(
+            f"must be a whole number >= 1, got {_show(text)}"
+        )
+    return int(text)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m src.logsum",
@@ -321,6 +338,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="replace OUTPUT if it already exists (never if it is INPUT)",
+    )
+    parser.add_argument(
+        "--min-count",
+        metavar="N",
+        type=_min_count,
+        default=1,
+        help="output only groups with count >= N (whole number >= 1; default 1)",
     )
     return parser
 
@@ -349,6 +373,7 @@ def main(argv: list[str] | None = None) -> int:
         groups, skipped = summarise(header, rows, args.strict)
     except MalformedRowError as exc:
         return _fail(EXIT_MALFORMED, f"malformed row (--strict): {exc}")
+    groups = filter_groups(groups, args.min_count)
     try:
         write_output(args.output, render(groups), args.force)
     except OutputExistsError:  # OUTPUT appeared after the early check
