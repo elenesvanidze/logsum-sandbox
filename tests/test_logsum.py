@@ -60,7 +60,7 @@ class Workspace:
     def run(self, *args, cwd=None) -> Run:
         proc = subprocess.run(
             COMMAND + [str(a) for a in args],
-            check=False, 
+            check=False,
             cwd=str(cwd or self.root),
             capture_output=True,
             timeout=60,
@@ -964,10 +964,14 @@ def test_cli_relative_paths_from_cwd(ws):
         ("--force",),
         ("--strict", "--force"),
         ("--force", "--strict"),
+        ("--min-count", "1"),
+        ("--min-count=1",),
+        ("--min-count", "1", "--force"),
+        ("--strict", "--force", "--min-count", "1"),
     ],
 )
 def test_flags_after_positionals_in_either_order(ws, flags):
-    # Usage: INPUT OUTPUT [--strict] [--force]
+    # Usage: INPUT OUTPUT [--strict] [--force] [--min-count N]
     ws.write(GOOD)
     assert_ok(ws.run(ws.input, ws.output, *flags))
     assert ws.summary() == {("api", "INFO"): (1, T, T)}
@@ -983,6 +987,11 @@ def test_flags_after_positionals_in_either_order(ws, flags):
         pytest.param(["IN", "OUT", "--bogus"], id="unknown-flag"),
         pytest.param(["IN", "OUT", "EXTRA"], id="extra-positional"),
         pytest.param(["--bogus", "IN", "OUT"], id="unknown-flag-first"),
+        pytest.param(["IN", "OUT", "--min-count"], id="min-count-missing-value"),
+        pytest.param(["IN", "OUT", "--min-count", "0"], id="min-count-zero"),
+        pytest.param(
+            ["IN", "OUT", "--min-count", "abc"], id="min-count-not-a-number"
+        ),
     ],
 )
 def test_usage_errors_exit_2(ws, args):
@@ -1137,6 +1146,190 @@ def test_strict_does_not_change_io_error_exit_code(ws):
 
 
 # ==========================================================================
+# §7 --min-count
+# ==========================================================================
+# counts: (api, ERROR) = 2, (api, INFO) = 3, (web, INFO) = 1
+MC_ROWS = [
+    "2026-03-01T10:00:00Z,INFO,api,m",
+    "2026-03-01T10:00:01Z,INFO,api,m",
+    "2026-03-01T10:00:02Z,INFO,api,m",
+    "2026-03-01T10:00:03Z,ERROR,api,m",
+    "2026-03-01T10:00:04Z,ERROR,api,m",
+    "2026-03-01T10:00:05Z,INFO,web,m",
+]
+ALL_GROUPS = {("api", "ERROR"), ("api", "INFO"), ("web", "INFO")}
+
+
+@pytest.mark.parametrize(
+    "n, kept",
+    [
+        (1, ALL_GROUPS),
+        (2, {("api", "ERROR"), ("api", "INFO")}),  # count == N kept, N-1 dropped
+        (3, {("api", "INFO")}),
+        (4, set()),
+    ],
+)
+def test_min_count_keeps_groups_with_count_at_least_n(ws, n, kept):
+    ws.write(*MC_ROWS)
+    assert_ok(ws.cli("--min-count", n))
+    assert set(ws.summary()) == kept
+
+
+def test_min_count_exact_output_bytes(ws):
+    ws.write(*MC_ROWS)
+    assert_ok(ws.cli("--min-count", 2))
+    assert ws.out_bytes() == (
+        b"service,level,count,first_seen,last_seen\n"
+        b"api,ERROR,2,2026-03-01T10:00:03Z,2026-03-01T10:00:04Z\n"
+        b"api,INFO,3,2026-03-01T10:00:00Z,2026-03-01T10:00:02Z\n"
+    )
+
+
+def test_default_output_equals_min_count_1(ws):
+    ws.write(*MC_ROWS)
+    assert_ok(ws.cli())
+    default_out = ws.out_bytes()
+    assert set(ws.summary()) == ALL_GROUPS
+    ws.output.unlink()
+    assert_ok(ws.cli("--min-count", 1))
+    assert ws.out_bytes() == default_out
+
+
+def test_min_count_above_every_group_gives_header_only(ws):
+    ws.write(*MC_ROWS)
+    assert_ok(ws.cli("--min-count", 10**12))
+    assert ws.out_bytes() == OUT_HEADER_LINE.encode()
+
+
+def test_min_count_counts_after_normalisation_merges(ws):
+    ws.write(
+        f"{T},info,API,m",
+        f"{T},Info,Api,m",
+        f"{T},  INFO ,  api  ,m",
+        f"{T},WARN,api,m",
+    )
+    assert_ok(ws.cli("--min-count", 3))
+    assert ws.summary() == {("api", "INFO"): (3, T, T)}
+
+
+def test_min_count_duplicate_rows_count_toward_n(ws):
+    ws.write(GOOD, GOOD, GOOD)
+    assert_ok(ws.cli("--min-count", 3))
+    assert ws.summary() == {("api", "INFO"): (3, T, T)}
+
+
+def test_min_count_malformed_rows_never_count_toward_n(ws):
+    ws.write(GOOD, GOOD, "bad,INFO,api,m")
+    r = ws.cli("--min-count", 3)
+    assert r.code == 0, r.stderr
+    assert ws.out_bytes() == OUT_HEADER_LINE.encode()
+    assert_skipped_count(r.stderr, 1)
+
+
+def test_min_count_does_not_change_stderr(ws):
+    ws.write(*MC_ROWS, "bad,INFO,api,m")
+    plain = ws.cli()
+    assert_ok(plain)
+    ws.output.unlink()
+    filtered = ws.cli("--min-count", 3)
+    assert_ok(filtered)
+    assert filtered.stderr == plain.stderr
+    assert_skipped_count(filtered.stderr, 1)
+
+
+def test_min_count_with_strict(ws):
+    ws.write(*MC_ROWS)
+    assert_ok(ws.cli("--strict", "--min-count", 3))
+    assert set(ws.summary()) == {("api", "INFO")}
+
+
+def test_min_count_with_force_replaces_output(ws):
+    ws.write(*MC_ROWS)
+    ws.output.write_bytes(b"old\n")
+    assert_ok(ws.cli("--min-count", 3, "--force"))
+    assert set(ws.summary()) == {("api", "INFO")}
+    assert ws.listing() == ["events.csv", "summary.csv"]
+
+
+def test_min_count_does_not_bypass_existing_output_check(ws):
+    ws.write(*MC_ROWS)
+    ws.output.write_bytes(b"old\n")
+    assert_fail(ws.cli("--min-count", 3), 1)
+    assert ws.out_bytes() == b"old\n"
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        ("--min-count", "3"),
+        ("--min-count=3",),
+        ("--strict", "--min-count", "3"),
+        ("--min-count", "3", "--strict"),
+        ("--force", "--min-count=3", "--strict"),
+    ],
+    ids=" ".join,
+)
+def test_min_count_flag_forms_and_order(ws, flags):
+    ws.write(*MC_ROWS)
+    assert_ok(ws.run(ws.input, ws.output, *flags))
+    assert set(ws.summary()) == {("api", "INFO")}
+
+
+def test_min_count_before_positionals(ws):
+    ws.write(*MC_ROWS)
+    assert_ok(ws.run("--min-count", 3, ws.input, ws.output))
+    assert set(ws.summary()) == {("api", "INFO")}
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["0", "-1", "abc", "1.5", "", "3x", "1e2", "0x3", "+3", " 3", "３"],
+    ids=repr,
+)
+def test_min_count_invalid_value_exit_2(ws, bad):
+    ws.write(GOOD)
+    assert_fail(ws.cli("--min-count", bad), 2)
+    assert not ws.output.exists()
+
+
+def test_min_count_equals_form_invalid_value_exit_2(ws):
+    ws.write(GOOD)
+    assert_fail(ws.cli("--min-count=0"), 2)
+    assert_fail(ws.cli("--min-count=-1"), 2)
+    assert not ws.output.exists()
+
+
+def test_min_count_missing_value_exit_2(ws):
+    ws.write(GOOD)
+    assert_fail(ws.cli("--min-count"), 2)
+    assert_fail(ws.cli("--min-count", "--strict"), 2)
+    assert not ws.output.exists()
+
+
+def test_min_count_usage_error_is_checked_before_missing_input(ws):
+    assert_fail(ws.run(ws.root / "missing.csv", ws.output, "--min-count", 0), 2)
+    assert not ws.output.exists()
+
+
+def test_min_count_usage_error_is_checked_before_same_file(ws):
+    ws.write(GOOD)
+    assert_fail(ws.run(ws.input, ws.input, "--min-count", 0), 2)
+
+
+def test_min_count_does_not_change_same_file_exit_1(ws):
+    ws.write(GOOD)
+    assert_fail(ws.run(ws.input, ws.input, "--min-count", 2), 1)
+    assert ws.listing() == ["events.csv"]
+
+
+@pytest.mark.parametrize("make", FAILURES, ids=lambda f: f.__name__.strip("_"))
+def test_min_count_does_not_change_failure_codes(ws, make):
+    flags, code = make(ws)
+    assert_fail(ws.cli(*flags, "--min-count", 2), code)
+    assert ws.listing() == ["events.csv"]
+
+
+# ==========================================================================
 # data/sample_events.csv: content-independent smoke tests
 # (the file is copied to a temp dir; the original is never touched)
 # ==========================================================================
@@ -1189,3 +1382,16 @@ def test_sample_file_strict_agrees_with_default_run(sample):
     else:
         assert_fail(s, 4)
         assert not sample.output.exists()
+
+
+def test_sample_file_min_count_output_is_filtered_subset(sample):
+    assert_ok(sample.cli())
+    full = sample.summary()
+    sample.output.unlink()
+
+    n = 2
+    assert_ok(sample.cli("--min-count", n))
+    filtered = sample.summary()
+    assert filtered == {k: v for k, v in full.items() if v[0] >= n}
+    keys = [(x[0], x[1]) for x in sample.out_rows()[1:]]
+    assert keys == sorted(keys)
