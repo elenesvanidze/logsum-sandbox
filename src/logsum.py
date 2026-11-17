@@ -94,6 +94,61 @@ def format_timestamp(moment: datetime) -> str:
     )
 
 
+def _decode(raw: bytes) -> str:
+    """Decode the file as UTF-8 (BOM allowed); raise FileLevelError if unusable."""
+    if not raw:
+        raise FileLevelError("input file is empty (zero bytes)")
+    try:
+        return raw.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise FileLevelError(f"input file is not valid UTF-8: {exc}") from None
+
+
+def _read_records(
+    text: str,
+) -> tuple[list[str] | None, list[tuple[int, int, list[str]]]]:
+    """Split CSV text into (header or None, data rows).
+
+    The first non-blank record is the header (names stripped). Each later
+    non-blank record is returned as (first_line, last_line, fields); a record
+    spans several lines when a quoted field contains newlines.
+    """
+    # Raise csv's 128 KiB field limit so a large valid field is not reported as
+    # bad quoting. The limit is global, so it is restored in `finally`.
+    previous_limit = csv.field_size_limit(2**31 - 1)
+    reader = csv.reader(io.StringIO(text, newline=""), strict=True)
+    header: list[str] | None = None
+    rows: list[tuple[int, int, list[str]]] = []
+    lines_consumed = 0
+    try:
+        for fields in reader:
+            first_line = lines_consumed + 1
+            lines_consumed = reader.line_num
+            if not fields:  # completely blank line outside quotes
+                continue
+            if header is None:
+                header = [name.strip() for name in fields]
+            else:
+                rows.append((first_line, lines_consumed, fields))
+    except csv.Error as exc:
+        raise FileLevelError(
+            f"improperly quoted input near line {reader.line_num}: {exc}"
+        ) from None
+    finally:
+        csv.field_size_limit(previous_limit)
+    return header, rows
+
+
+def _check_header(header: list[str]) -> None:
+    """Require every REQUIRED_COLUMNS name exactly once; raise FileLevelError."""
+    missing = [name for name in REQUIRED_COLUMNS if name not in header]
+    if missing:
+        raise FileLevelError("header is missing column(s): " + ", ".join(missing))
+    repeated = [name for name in REQUIRED_COLUMNS if header.count(name) > 1]
+    if repeated:
+        raise FileLevelError("header repeats column(s): " + ", ".join(repeated))
+
+
 def load_input(raw: bytes) -> tuple[list[str], list[tuple[int, int, list[str]]]]:
     """Decode and parse the whole file; return (header, data rows).
 
@@ -101,45 +156,11 @@ def load_input(raw: bytes) -> tuple[list[str], list[tuple[int, int, list[str]]]]
     (§6) happens here, before any row is judged, so that it takes precedence
     over row-level handling. Raises FileLevelError.
     """
-    if not raw:
-        raise FileLevelError("input file is empty (zero bytes)")
-    try:
-        text = raw.decode("utf-8-sig")
-    except UnicodeDecodeError as exc:
-        raise FileLevelError(f"input file is not valid UTF-8: {exc}") from None
-
-    # Raise csv's 128 KiB field limit so a large valid field is not reported as
-    # bad quoting. The limit is global, so it is restored in `finally`.
-    previous_limit = csv.field_size_limit(2**31 - 1)
-    reader = csv.reader(io.StringIO(text, newline=""), strict=True)
-    header: list[str] | None = None
-    rows: list[tuple[int, int, list[str]]] = []
-    previous_line = 0
-    try:
-        for fields in reader:
-            first_line = previous_line + 1
-            previous_line = reader.line_num
-            if not fields:  # completely blank line outside quotes
-                continue
-            if header is None:
-                header = [name.strip() for name in fields]
-            else:
-                rows.append((first_line, previous_line, fields))
-    except csv.Error as exc:
-        raise FileLevelError(
-            f"improperly quoted input near line {reader.line_num}: {exc}"
-        ) from None
-    finally:
-        csv.field_size_limit(previous_limit)
-
+    text = _decode(raw)
+    header, rows = _read_records(text)
     if header is None:
         raise FileLevelError("header is missing: the file has no non-blank line")
-    missing = [name for name in REQUIRED_COLUMNS if name not in header]
-    if missing:
-        raise FileLevelError("header is missing column(s): " + ", ".join(missing))
-    repeated = [name for name in REQUIRED_COLUMNS if header.count(name) > 1]
-    if repeated:
-        raise FileLevelError("header repeats column(s): " + ", ".join(repeated))
+    _check_header(header)
     return header, rows
 
 
