@@ -33,6 +33,9 @@ Rows from the whole file are pooled. There is no time bucketing.
 ## 3. Aggregates: count, first_seen, last_seen
 Each output row has `count`, `first_seen` and `last_seen`.
 - `count`: number of valid rows in the group.
+- `count` is final per group. A `--min-count` filter (§7) is applied after
+  all rows are pooled and counted. It never changes `count`, `first_seen` or
+  `last_seen` of a group that is kept.
 - `first_seen` / `last_seen`: earliest and latest timestamp among valid rows
   in the group.
 - Timestamps have whole-second precision. A fractional part in the input is
@@ -102,17 +105,27 @@ and the exit code is 0:
 - The input has a valid header and no data rows (blank lines do not count).
 - Every data row is malformed and `--strict` is not set. The skipped count is
   still reported on stderr (§5).
+- Every group is removed by `--min-count` (§7). Malformed rows are still
+  handled as in §5.
 
 ## 7. CLI flags and exit codes
-Usage: `<command> INPUT OUTPUT [--strict] [--force]`
+Usage: `<command> INPUT OUTPUT [--strict] [--force] [--min-count N]`
 - `INPUT` (required, positional): path to the input CSV file.
 - `OUTPUT` (required, positional): path where the summary CSV is written.
 - `--strict`: fail on the first malformed row (§5).
 - `--force`: allow replacing an existing `OUTPUT` file. It never allows
   `OUTPUT` to be the same file as `INPUT`.
+- `--min-count N`: write only groups whose `count` (§3) is at least `N`.
+  `N` must be a whole number of 1 or more, written with ASCII digits only.
+  `0`, negative numbers, decimals, signs, spaces, non-ASCII digits, empty
+  and missing values are usage errors. The default is 1, which writes every
+  group. Malformed rows never count toward `N`. The filter does not change
+  the skipped count reported on stderr (§5). Both `--min-count N` and
+  `--min-count=N` are accepted.
 
 Output file rules:
 - Header: `service,level,count,first_seen,last_seen`.
+- The header is always written, even when `--min-count` removes every group.
 - Rows are sorted by `service`, then `level`, in plain string order.
 - Encoding is UTF-8 without a byte order mark. Lines end with `\n`,
   including the last line.
@@ -130,12 +143,13 @@ Output file rules:
   (including one that `--force` would have replaced) is left unchanged.
 
 Order of checks:
-1. Arguments (exit 2).
+1. Arguments (exit 2), including an invalid `--min-count` value.
 2. `OUTPUT` is the same file as `INPUT` (exit 1).
 3. `INPUT` exists and is readable (exit 1).
 4. `OUTPUT` exists without `--force` (exit 1).
 5. File-level validation of the whole file (exit 3).
-6. Row processing (exit 4 in `--strict` mode).
+6. Row processing (exit 4 in `--strict` mode). The `--min-count` filter is
+   then applied to the groups. It cannot fail.
 7. Write output (exit 1 if it cannot be written).
 
 On success, nothing is written to stdout. Warnings and the skipped count go
@@ -145,7 +159,7 @@ to stderr.
 |---|---|
 | 0 | Success, including empty but valid input (§6) |
 | 1 | I/O error: `INPUT` does not exist or cannot be read, `OUTPUT` cannot be written (including a missing parent directory), `OUTPUT` exists without `--force`, or `OUTPUT` is the same file as `INPUT` |
-| 2 | Usage error: `INPUT` or `OUTPUT` not provided, or unknown arguments |
+| 2 | Usage error: `INPUT` or `OUTPUT` not provided, unknown arguments, or an invalid or missing `--min-count` value |
 | 3 | File-level failure (§6): zero bytes, invalid UTF-8, missing or duplicated required columns, or improper quoting |
 | 4 | Malformed row encountered in `--strict` mode (§5) |
 
@@ -161,9 +175,6 @@ to stderr.
 - Writing output in any format other than the summary CSV, such as JSON,
   Excel, or Parquet.
 - Input encodings other than UTF-8.
-
-## Signed off
-E.S. — 2026-11-16
 
 ## Implementation notes
 
@@ -183,3 +194,6 @@ removing any of them would be a guess and could hide real activity.
 
 If the input later gains a column that identifies an event, deduplication can
 be reconsidered as a new, separately signed-off change.
+
+## Signed off
+E.S. — 2026-11-17
