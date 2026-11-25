@@ -1,0 +1,3 @@
+# Cold context
+
+This folder holds context that isn't loaded by default and is read only when a task needs it. `gap-log.md` is the index of known holes in the written record: a deprecated path nobody removed (G1), a decision made verbally (G2), and an incident that shaped a current pattern (G3). Each row names the gap and points to its evidence. It doesn't hold the history. Add a row for each new gap, and when one is closed, move its facts into `docs/context/stack.md` or `spec.md` and mark the row `closed`.
