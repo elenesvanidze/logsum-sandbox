@@ -1,0 +1,17 @@
+name: test-deletion-guard
+on:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  check:
+    name: test-deletion-guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Run check
+        run: bash scripts/ci/check_test_deletion.sh origin/main
